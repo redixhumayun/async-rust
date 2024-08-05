@@ -42,7 +42,7 @@ impl Future for TimerFuture {
 }
 
 impl TimerFuture {
-    fn new(duration: Duration) -> Self {
+    pub fn new(duration: Duration) -> Self {
         let shared_state = Arc::new(Mutex::new(SharedState {
             completed: false,
             waker: None,
@@ -74,12 +74,12 @@ impl ArcWake for Task {
     }
 }
 
-struct Spawner {
+pub struct Spawner {
     task_sender: SyncSender<Arc<Task>>,
 }
 
 impl Spawner {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         let box_future = future.boxed();
         let task = Arc::new(Task {
             future: Mutex::new(box_future),
@@ -89,12 +89,12 @@ impl Spawner {
     }
 }
 
-struct Executor {
+pub struct Executor {
     task_queue: Receiver<Arc<Task>>,
 }
 
 impl Executor {
-    fn run(&self) {
+    pub fn run(&self) {
         println!("run");
         while let Ok(task) = self.task_queue.recv() {
             println!("received task");
@@ -107,7 +107,7 @@ impl Executor {
         }
     }
 
-    fn executor_and_spawner() -> (Executor, Spawner) {
+    pub fn executor_and_spawner() -> (Executor, Spawner) {
         let (sync_sender, receiver) = sync_channel(10000);
         let executor = Executor {
             task_queue: receiver,
