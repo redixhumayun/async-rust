@@ -1,142 +1,295 @@
-use std::os::{
-    fd::{AsRawFd, RawFd},
-    raw::c_int,
+use std::sync::{Arc, Mutex};
+#[allow(dead_code)]
+use std::{
+    collections::HashMap,
+    net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
 };
 
-use libc::{kevent, EVFILT_READ, EVFILT_WRITE, EV_ADD, EV_DELETE, EV_ENABLE, EV_ONESHOT};
+use reactor::{Event, Reactor};
+use task_queue::{RegistrationTask, ScheduledTask, Task, TaskQueue, UnregistrationTask};
+mod reactor;
+mod task_queue;
+
+trait EventHandler {
+    fn event(&mut self, event: Event);
+    fn poll(&mut self);
+}
 
 #[derive(Debug)]
-struct Event {
+enum AsyncTcpClientState {
+    Waiting,
+    Reading,
+    Writing,
+    Close(usize), //  the file descriptor
+    Closed,
+}
+
+struct AsyncTcpClient {
+    client: TcpStream,
     fd: usize,
-    readable: bool,
-    writable: bool,
+    reactor: Arc<Mutex<Reactor>>,
+    task_queue: Arc<Mutex<TaskQueue>>,
+    state: Option<AsyncTcpClientState>,
 }
 
-impl Event {
-    fn readable(fd: i32) -> Self {
-        Event {
-            fd: fd as usize,
-            readable: true,
-            writable: false,
-        }
-    }
-}
-
-struct Reactor {
-    kq: RawFd, //  the kqueue fd
-    events: Vec<libc::kevent>,
-    capacity: usize,
-}
-
-impl Reactor {
-    pub fn new() -> std::io::Result<Self> {
-        let kq = unsafe { libc::kqueue() };
-        if kq < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+impl AsyncTcpClient {
+    fn new(
+        client: TcpStream,
+        reactor: Arc<Mutex<Reactor>>,
+        task_queue: Arc<Mutex<TaskQueue>>,
+    ) -> std::io::Result<Self> {
+        let fd = client.as_raw_fd();
+        reactor.lock().unwrap().add(fd, Event::readable(fd))?;
         Ok(Self {
-            kq,
-            events: Vec::new(),
-            capacity: 1,
+            client,
+            fd: fd as usize,
+            reactor,
+            task_queue,
+            state: Some(AsyncTcpClientState::Waiting),
         })
     }
+}
 
-    pub fn add(&mut self, fd: RawFd, ev: Event) -> std::io::Result<()> {
-        self.modify(fd, ev)
+impl EventHandler for AsyncTcpClient {
+    fn event(&mut self, event: Event) {
+        match self.state.take() {
+            Some(AsyncTcpClientState::Waiting) => {
+                if event.readable {
+                    self.state.replace(AsyncTcpClientState::Reading);
+                    self.task_queue
+                        .lock()
+                        .unwrap()
+                        .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
+                }
+            }
+            Some(s) => {
+                self.state.replace(s);
+            }
+            None => {
+                panic!("state was none");
+            }
+        }
     }
 
-    fn modify(&self, fd: RawFd, ev: Event) -> std::io::Result<()> {
-        let read_flags = if ev.readable {
-            EV_ADD | EV_ONESHOT
-        } else {
-            EV_DELETE
-        };
-        let changes = [kevent {
-            ident: fd as usize,
-            filter: EVFILT_READ,
-            flags: read_flags,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        }];
-        let result = unsafe {
-            kevent(
-                self.kq,
-                changes.as_ptr(),
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-            )
-        };
-        if result < 0 {
-            return Err(std::io::Error::last_os_error());
+    fn poll(&mut self) {
+        println!("called poll on client with state {:?}", self.state);
+        match self.state.take() {
+            None => {}
+            Some(AsyncTcpClientState::Waiting) => {
+                panic!("The Waiting state should not be reached in the poll fn for client")
+            }
+            Some(AsyncTcpClientState::Reading) => {
+                println!("reading the data from the client into a buffer");
+                self.state.replace(AsyncTcpClientState::Writing);
+                self.task_queue
+                    .lock()
+                    .unwrap()
+                    .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
+                println!("done adding task back after READING");
+            }
+            Some(AsyncTcpClientState::Writing) => {
+                println!("writing the data back into the stream");
+                self.state.replace(AsyncTcpClientState::Close(self.fd));
+                self.task_queue
+                    .lock()
+                    .unwrap()
+                    .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
+            }
+            Some(AsyncTcpClientState::Close(fd)) => {
+                println!("closing the client socket connection");
+                //  remove the client fd from the reactor and unregister from the event loop
+                self.reactor
+                    .lock()
+                    .unwrap()
+                    .delete(fd.try_into().unwrap())
+                    .unwrap();
+                self.task_queue
+                    .lock()
+                    .unwrap()
+                    .add_task(Task::UnregistrationTask(UnregistrationTask { fd: self.fd }));
+                self.client.shutdown(std::net::Shutdown::Both).unwrap();
+                self.state.replace(AsyncTcpClientState::Closed);
+            }
+            Some(AsyncTcpClientState::Closed) => {}
         }
-        Ok(())
-    }
-
-    pub fn poll(&mut self) -> std::io::Result<Vec<Event>> {
-        let max_capacity = self.capacity as c_int;
-        self.events.clear();
-        let result = unsafe {
-            self.events
-                .resize(max_capacity as usize, std::mem::zeroed());
-            let result = kevent(
-                self.kq,
-                std::ptr::null(),
-                0,
-                self.events.as_mut_ptr(),
-                max_capacity,
-                std::ptr::null(),
-            );
-            result
-        };
-        if result < 0 {
-            //  return the last OS error
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let mut mapped_events = Vec::new();
-        for i in 0..result as usize {
-            let kevent = &self.events[i];
-            let ident = kevent.ident;
-            let filter = kevent.filter;
-
-            let mut event = Event {
-                fd: ident,
-                readable: false,
-                writable: false,
-            };
-
-            match filter {
-                EVFILT_READ => event.readable = true,
-                EVFILT_WRITE => event.writable = true,
-                _ => {}
-            };
-            self.modify(event.fd as i32, Event::readable(event.fd as i32))?;
-            mapped_events.push(event);
-        }
-        Ok(mapped_events)
     }
 }
 
-fn main() {
-    let mut reactor = Reactor::new().unwrap();
-    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:8000").unwrap();
-    let raw_fd = tcp_listener.as_raw_fd();
-    reactor.add(raw_fd, Event::readable(raw_fd)).unwrap();
-    loop {
-        let events = reactor.poll().unwrap();
-        println!("the events received {:?}", events);
-        for event in events {
-            if event.readable {
-                match tcp_listener.accept() {
-                    Ok((mut socket, addr)) => {
-                        println!("received new connection");
+enum AsyncTcpListenerState {
+    WaitingForConnection,
+    Accepting(TcpStream),
+}
+
+struct AsyncTcpListener {
+    listener: TcpListener,
+    fd: usize,
+    reactor: Arc<Mutex<Reactor>>,
+    task_queue: Arc<Mutex<TaskQueue>>,
+    state: Option<AsyncTcpListenerState>,
+}
+
+impl AsyncTcpListener {
+    fn new(
+        listener: TcpListener,
+        reactor: Arc<Mutex<Reactor>>,
+        task_queue: Arc<Mutex<TaskQueue>>,
+    ) -> std::io::Result<Self> {
+        let fd = listener.as_raw_fd();
+        reactor.lock().unwrap().add(fd, Event::readable(fd))?;
+        Ok(AsyncTcpListener {
+            listener,
+            fd: fd as usize,
+            reactor,
+            task_queue,
+            state: Some(AsyncTcpListenerState::WaitingForConnection),
+        })
+    }
+}
+
+impl EventHandler for AsyncTcpListener {
+    fn event(&mut self, event: Event) {
+        println!("received event on AsyncTcpListener {:?}", event);
+        match event.readable {
+            true => match self.listener.accept() {
+                Ok((client, addr)) => {
+                    println!("received client connection from addr {addr}");
+                    self.state.replace(AsyncTcpListenerState::Accepting(client));
+                    self.task_queue
+                        .lock()
+                        .unwrap()
+                        .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
+                }
+                Err(e) => eprintln!("Error accepting connection: {}", e),
+            },
+            false => {
+                panic!("AsyncTcpListener received an event that is not readable")
+            }
+        }
+    }
+
+    fn poll(&mut self) {
+        match self.state.take() {
+            Some(AsyncTcpListenerState::Accepting(client)) => {
+                let client = AsyncTcpClient::new(
+                    client,
+                    Arc::clone(&self.reactor),
+                    Arc::clone(&self.task_queue),
+                )
+                .unwrap();
+                self.task_queue
+                    .lock()
+                    .unwrap()
+                    .add_task(Task::RegistrationTask(RegistrationTask {
+                        fd: client.fd,
+                        reference: Box::new(client),
+                    }));
+            }
+            Some(AsyncTcpListenerState::WaitingForConnection) => {
+                panic!("The WaitingForConnection state should not be reached in the poll fn for listener")
+            }
+            None => {
+                panic!("No state found in the poll fn for listener")
+            }
+        }
+    }
+}
+
+struct EventLoop {
+    reactor: Arc<Mutex<Reactor>>,
+    task_queue: Arc<Mutex<TaskQueue>>,
+    references: HashMap<usize, Box<dyn EventHandler>>,
+}
+
+impl EventLoop {
+    fn new(reactor: Arc<Mutex<Reactor>>, task_queue: Arc<Mutex<TaskQueue>>) -> Self {
+        Self {
+            reactor,
+            task_queue,
+            references: HashMap::new(),
+        }
+    }
+
+    /// Add a reference to the object backing the file descriptor
+    fn register(&mut self, fd: usize, reference: Box<dyn EventHandler>) {
+        self.references.insert(fd, reference);
+    }
+
+    /// Remove the reference backing the file descriptor
+    fn unregister(&mut self, fd: usize) {
+        self.references.remove(&fd);
+    }
+
+    fn process_tasks(&mut self) {
+        let mut tasks_to_process = Vec::new();
+
+        {
+            // Collect tasks to process
+            let mut task_queue = self.task_queue.lock().unwrap();
+            while let Some(task) = task_queue.queue.pop() {
+                tasks_to_process.push(task);
+            }
+        }
+
+        // Process collected tasks
+        for task in tasks_to_process {
+            match task {
+                Task::RegistrationTask(registration_task) => {
+                    self.register(registration_task.fd, registration_task.reference);
+                }
+                Task::UnregistrationTask(unregistration_task) => {
+                    self.unregister(unregistration_task.fd);
+                }
+                Task::ScheduledTask(scheduled_task) => {
+                    if let Some(reference) = self.references.get_mut(&scheduled_task.fd) {
+                        reference.poll();
                     }
-                    Err(e) => eprintln!("Error accepting connection: {}", e),
                 }
             }
         }
     }
+
+    fn handle_events(&mut self, events: Vec<Event>) {
+        for event in events {
+            if let Some(reference) = self.references.get_mut(&event.fd) {
+                reference.event(event);
+            }
+        }
+    }
+
+    fn run(&mut self) {
+        loop {
+            self.process_tasks();
+
+            let events = self
+                .reactor
+                .lock()
+                .unwrap()
+                .poll()
+                .expect("Error polling the reactor");
+
+            self.handle_events(events);
+        }
+    }
+}
+
+fn main() {
+    let reactor = Arc::new(Mutex::new(Reactor::new().unwrap()));
+    let task_queue = Arc::new(Mutex::new(TaskQueue::new()));
+    let mut event_loop = EventLoop::new(Arc::clone(&reactor), Arc::clone(&task_queue));
+
+    //  start listener
+    let tcp_listener = TcpListener::bind("127.0.0.1:8000").unwrap();
+    let listener =
+        AsyncTcpListener::new(tcp_listener, Arc::clone(&reactor), Arc::clone(&task_queue)).unwrap();
+    task_queue
+        .lock()
+        .unwrap()
+        .add_task(Task::RegistrationTask(RegistrationTask {
+            fd: listener.fd,
+            reference: Box::new(listener),
+        }));
+
+    //  start the event loop
+    event_loop.run();
 }
