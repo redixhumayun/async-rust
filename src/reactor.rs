@@ -1,4 +1,10 @@
-use std::os::fd::RawFd;
+use std::{
+    io::{Read, Write},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::net::UnixStream,
+    },
+};
 
 use libc::{c_int, kevent, EVFILT_READ, EVFILT_WRITE, EV_ADD, EV_DELETE, EV_ONESHOT};
 
@@ -31,6 +37,7 @@ pub struct Reactor {
     kq: RawFd, //  the kqueue fd
     events: Vec<libc::kevent>,
     capacity: usize,
+    notifier: (UnixStream, UnixStream),
 }
 
 impl Reactor {
@@ -39,11 +46,20 @@ impl Reactor {
         if kq < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Self {
+        let (read_stream, write_stream) = UnixStream::pair()?;
+        read_stream.set_nonblocking(true)?;
+        write_stream.set_nonblocking(true)?;
+        let reactor = Self {
             kq,
             events: Vec::new(),
             capacity: 1,
-        })
+            notifier: (read_stream, write_stream),
+        };
+        reactor.modify(
+            reactor.notifier.0.as_raw_fd(),
+            Event::readable(reactor.notifier.0.as_raw_fd()),
+        )?;
+        Ok(reactor)
     }
 
     pub fn add(&mut self, fd: RawFd, ev: Event) -> std::io::Result<()> {
@@ -52,6 +68,11 @@ impl Reactor {
 
     pub fn delete(&mut self, fd: RawFd) -> std::io::Result<()> {
         self.modify(fd, Event::none(fd))
+    }
+
+    pub fn notify(&mut self) -> std::io::Result<()> {
+        self.notifier.1.write(&[1])?;
+        Ok(())
     }
 
     fn modify(&self, fd: RawFd, ev: Event) -> std::io::Result<()> {
@@ -110,6 +131,15 @@ impl Reactor {
             let kevent = &self.events[i];
             let ident = kevent.ident;
             let filter = kevent.filter;
+
+            let mut buf = [0; 8];
+            if ident == self.notifier.0.as_raw_fd() as usize {
+                self.notifier.0.read(&mut buf)?;
+                self.modify(
+                    self.notifier.0.as_raw_fd(),
+                    Event::readable(self.notifier.0.as_raw_fd()),
+                )?;
+            }
 
             let mut event = Event {
                 fd: ident,

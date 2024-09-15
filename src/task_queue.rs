@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::EventHandler;
 
 pub struct RegistrationTask {
@@ -17,6 +19,16 @@ pub enum Task {
     RegistrationTask(RegistrationTask),
     UnregistrationTask(UnregistrationTask),
     ScheduledTask(ScheduledTask),
+}
+
+impl Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Task::RegistrationTask(task) => write!(f, "RegistrationTask: fd {}", task.fd),
+            Task::UnregistrationTask(task) => write!(f, "UnregistrationTask: fd {}", task.fd),
+            Task::ScheduledTask(task) => write!(f, "ScheduledTask: fd {}", task.fd),
+        }
+    }
 }
 
 pub struct TaskQueue {

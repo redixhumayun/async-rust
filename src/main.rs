@@ -1,9 +1,13 @@
-use std::sync::{Arc, Mutex};
 #[allow(dead_code)]
 use std::{
     collections::HashMap,
     net::{TcpListener, TcpStream},
     os::fd::AsRawFd,
+};
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    sync::{Arc, Mutex},
 };
 
 use reactor::{Event, Reactor};
@@ -21,7 +25,7 @@ enum AsyncTcpClientState {
     Waiting,
     Reading,
     Writing,
-    Close(usize), //  the file descriptor
+    Close,
     Closed,
 }
 
@@ -73,7 +77,6 @@ impl EventHandler for AsyncTcpClient {
     }
 
     fn poll(&mut self) {
-        println!("called poll on client with state {:?}", self.state);
         match self.state.take() {
             None => {}
             Some(AsyncTcpClientState::Waiting) => {
@@ -81,28 +84,55 @@ impl EventHandler for AsyncTcpClient {
             }
             Some(AsyncTcpClientState::Reading) => {
                 println!("reading the data from the client into a buffer");
+                let reader = BufReader::new(&self.client);
+                let http_request: Vec<_> = reader
+                    .lines()
+                    .map(|line| line.unwrap())
+                    .take_while(|line| !line.is_empty())
+                    .collect();
+                if http_request
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .contains("GET / HTTP/1.1")
+                {
+                    self.state.replace(AsyncTcpClientState::Writing);
+                } else {
+                    eprintln!("received invalid request, closing the socket connection");
+                    self.state.replace(AsyncTcpClientState::Close);
+                }
+                println!("received request {:?}", http_request);
                 self.state.replace(AsyncTcpClientState::Writing);
                 self.task_queue
                     .lock()
                     .unwrap()
                     .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
-                println!("done adding task back after READING");
+                self.reactor.lock().unwrap().notify().unwrap();
             }
             Some(AsyncTcpClientState::Writing) => {
                 println!("writing the data back into the stream");
-                self.state.replace(AsyncTcpClientState::Close(self.fd));
+                let path = Path::new("hello.html");
+                let content = std::fs::read(path).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content.len(),
+                    String::from_utf8_lossy(&content)
+                );
+                self.client.write_all(response.as_bytes()).unwrap();
+                self.state.replace(AsyncTcpClientState::Close);
                 self.task_queue
                     .lock()
                     .unwrap()
                     .add_task(Task::ScheduledTask(ScheduledTask { fd: self.fd }));
+                self.reactor.lock().unwrap().notify().unwrap();
             }
-            Some(AsyncTcpClientState::Close(fd)) => {
+            Some(AsyncTcpClientState::Close) => {
                 println!("closing the client socket connection");
                 //  remove the client fd from the reactor and unregister from the event loop
                 self.reactor
                     .lock()
                     .unwrap()
-                    .delete(fd.try_into().unwrap())
+                    .delete(self.fd.try_into().unwrap())
                     .unwrap();
                 self.task_queue
                     .lock()
@@ -260,7 +290,6 @@ impl EventLoop {
     fn run(&mut self) {
         loop {
             self.process_tasks();
-
             let events = self
                 .reactor
                 .lock()
