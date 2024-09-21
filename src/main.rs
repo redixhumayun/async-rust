@@ -1,4 +1,5 @@
 #[allow(dead_code)]
+mod client;
 use std::{
     collections::HashMap,
     net::{TcpListener, TcpStream},
@@ -83,7 +84,6 @@ impl EventHandler for AsyncTcpClient {
                 panic!("The Waiting state should not be reached in the poll fn for client")
             }
             Some(AsyncTcpClientState::Reading) => {
-                println!("reading the data from the client into a buffer");
                 let reader = BufReader::new(&self.client);
                 let http_request: Vec<_> = reader
                     .lines()
@@ -101,7 +101,6 @@ impl EventHandler for AsyncTcpClient {
                     eprintln!("received invalid request, closing the socket connection");
                     self.state.replace(AsyncTcpClientState::Close);
                 }
-                println!("received request {:?}", http_request);
                 self.state.replace(AsyncTcpClientState::Writing);
                 self.task_queue
                     .lock()
@@ -110,7 +109,6 @@ impl EventHandler for AsyncTcpClient {
                 self.reactor.lock().unwrap().notify().unwrap();
             }
             Some(AsyncTcpClientState::Writing) => {
-                println!("writing the data back into the stream");
                 let path = Path::new("hello.html");
                 let content = std::fs::read(path).unwrap();
                 let response = format!(
@@ -127,7 +125,6 @@ impl EventHandler for AsyncTcpClient {
                 self.reactor.lock().unwrap().notify().unwrap();
             }
             Some(AsyncTcpClientState::Close) => {
-                println!("closing the client socket connection");
                 //  remove the client fd from the reactor and unregister from the event loop
                 self.reactor
                     .lock()
@@ -179,11 +176,9 @@ impl AsyncTcpListener {
 
 impl EventHandler for AsyncTcpListener {
     fn event(&mut self, event: Event) {
-        println!("received event on AsyncTcpListener {:?}", event);
         match event.readable {
             true => match self.listener.accept() {
-                Ok((client, addr)) => {
-                    println!("received client connection from addr {addr}");
+                Ok((client, _)) => {
                     self.state.replace(AsyncTcpListenerState::Accepting(client));
                     self.task_queue
                         .lock()
@@ -321,4 +316,52 @@ fn main() {
 
     //  start the event loop
     event_loop.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use crate::main;
+
+    #[test]
+    fn test_concurrent_requests() {
+        thread::spawn(|| {
+            main();
+        });
+        thread::sleep(Duration::from_secs(1));
+
+        let start_time = Instant::now();
+        let counter = Arc::new(Mutex::new(0));
+        const NUM_CON_REQ: u32 = 1000;
+        let mut handles: Vec<JoinHandle<()>> = vec![];
+        for _ in 0..NUM_CON_REQ {
+            let moved_counter = Arc::clone(&counter);
+            handles.push(std::thread::spawn(move || {
+                let mut stream = std::net::TcpStream::connect("localhost:8000").unwrap();
+                stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost:8000\r\n\r\n")
+                    .unwrap();
+                let mut response = String::new();
+                stream.read_to_string(&mut response).unwrap();
+                println!("Thread {:?} received response", thread::current().id());
+
+                let mut c = moved_counter.lock().unwrap();
+                *c += 1;
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let duration = start_time.elapsed();
+        println!("Time taken for {} requests {:?}", NUM_CON_REQ, duration);
+
+        let counter_value = counter.lock().unwrap();
+        assert_eq!(*counter_value, NUM_CON_REQ);
+    }
 }
