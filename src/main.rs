@@ -336,21 +336,49 @@ mod tests {
 
         let start_time = Instant::now();
         let counter = Arc::new(Mutex::new(0));
-        const NUM_CON_REQ: u32 = 1000;
+        const NUM_CON_REQ: u32 = 3000;
+        const MAX_RETRIES: u32 = 4;
         let mut handles: Vec<JoinHandle<()>> = vec![];
         for _ in 0..NUM_CON_REQ {
             let moved_counter = Arc::clone(&counter);
             handles.push(std::thread::spawn(move || {
-                let mut stream = std::net::TcpStream::connect("localhost:8000").unwrap();
-                stream
-                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost:8000\r\n\r\n")
-                    .unwrap();
-                let mut response = String::new();
-                stream.read_to_string(&mut response).unwrap();
-                println!("Thread {:?} received response", thread::current().id());
-
-                let mut c = moved_counter.lock().unwrap();
-                *c += 1;
+                let mut retries = 0;
+                loop {
+                    match std::net::TcpStream::connect("localhost:8000") {
+                        Ok(mut stream) => {
+                            stream
+                                .write_all(b"GET / HTTP/1.1\r\nHost: localhost:8000\r\n\r\n")
+                                .unwrap();
+                            let mut response = String::new();
+                            stream.read_to_string(&mut response).unwrap();
+                            println!("Thread {:?} received response", thread::current().id());
+                            let mut c = moved_counter.lock().unwrap();
+                            *c += 1;
+                            break;
+                        }
+                        Err(e) => {
+                            if e.raw_os_error() == Some(24) {
+                                if retries < MAX_RETRIES {
+                                    retries += 1;
+                                    std::thread::sleep(Duration::from_millis(100));
+                                } else {
+                                    eprintln!(
+                                        "Thread {:?} exceeded max retries",
+                                        std::thread::current().id()
+                                    );
+                                    break;
+                                }
+                            } else {
+                                eprintln!(
+                                    "Thread {:?} received err {}",
+                                    std::thread::current().id(),
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
             }));
         }
 
