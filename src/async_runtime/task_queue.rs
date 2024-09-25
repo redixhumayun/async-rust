@@ -1,21 +1,31 @@
+#![allow(dead_code)]
 use std::{
+    cell::RefCell,
+    fmt::Display,
     future::Future,
     pin::Pin,
+    rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
 };
 
 pub struct Task {
-    future: Pin<Box<dyn Future<Output = ()>>>,
+    pub future: RefCell<Pin<Box<dyn Future<Output = ()> + 'static>>>,
+}
+
+impl Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "task")
+    }
 }
 
 pub struct TaskQueue {
-    tasks: Vec<Task>,
-    sender: Sender<Task>,
-    receiver: Receiver<Task>,
+    tasks: Vec<Rc<Task>>,
+    sender: Sender<Rc<Task>>,
+    receiver: Receiver<Rc<Task>>,
 }
 
 impl TaskQueue {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let (sender, recv) = mpsc::channel();
         Self {
             tasks: Vec::new(),
@@ -24,17 +34,25 @@ impl TaskQueue {
         }
     }
 
-    fn sender(&self) -> Sender<Task> {
+    pub fn sender(&self) -> Sender<Rc<Task>> {
         self.sender.clone()
     }
 
-    fn receive(&mut self) {
+    pub fn receive(&mut self) {
         while let Ok(task) = self.receiver.try_recv() {
             self.tasks.push(task);
         }
     }
 
-    fn pop(&mut self) -> Option<Task> {
+    pub fn pop(&mut self) -> Option<Rc<Task>> {
         self.tasks.pop()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.len() == 0
     }
 }
