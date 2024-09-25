@@ -10,7 +10,7 @@ use std::{
     task::{Context, Waker},
 };
 
-use libc::{kevent, EVFILT_READ, EVFILT_WRITE, EV_ADD, EV_ONESHOT};
+use libc::{kevent, EVFILT_READ, EVFILT_WRITE, EV_ADD, EV_DELETE, EV_ONESHOT};
 use log::debug;
 
 #[derive(Debug)]
@@ -166,6 +166,50 @@ impl Reactor {
     /// A helper notify method to unblock the scheduler
     fn notify(&mut self) -> std::io::Result<usize> {
         self.notifier.1.write(&[1])
+    }
+
+    /// The function that removes interest for a file descriptor with the actual underlying syscall
+    pub fn remove(&self, fd: RawFd, ev: Event) -> std::io::Result<()> {
+        let mut changelist = Vec::new();
+        if ev.readable {
+            changelist.push(kevent {
+                ident: fd as _,
+                filter: EVFILT_READ,
+                flags: EV_DELETE,
+                fflags: 0,
+                data: 0,
+                udata: ev.fd as *mut c_void,
+            });
+        }
+        if ev.writable {
+            changelist.push(kevent {
+                ident: fd as _,
+                filter: EVFILT_READ,
+                flags: EV_DELETE,
+                fflags: 0,
+                data: 0,
+                udata: ev.fd as *mut c_void,
+            });
+        }
+
+        if changelist.is_empty() {
+            return Ok(());
+        }
+
+        let result = unsafe {
+            kevent(
+                self.kqueue_fd,
+                changelist.as_mut_ptr(),
+                changelist.len() as i32,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// The function that registers interest with the actual underlying syscall

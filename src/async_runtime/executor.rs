@@ -2,7 +2,7 @@
 use core::future::Future;
 use std::{cell::RefCell, rc::Rc, task::Context};
 
-use log::{debug, info};
+use log::debug;
 
 use super::{
     reactor::{Event, Reactor},
