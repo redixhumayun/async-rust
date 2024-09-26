@@ -9,17 +9,24 @@ use std::{
 };
 
 pub struct Task {
+    pub id: usize,
     pub future: RefCell<Pin<Box<dyn Future<Output = ()> + 'static>>>,
 }
 
 impl Display for Task {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "task")
+        write!(f, "task {}", self.id)
+    }
+}
+
+impl std::fmt::Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "task {}, ", self.id)
     }
 }
 
 pub struct TaskQueue {
-    tasks: Vec<Rc<Task>>,
+    pub tasks: Vec<Rc<Task>>,
     sender: Sender<Rc<Task>>,
     receiver: Receiver<Rc<Task>>,
 }

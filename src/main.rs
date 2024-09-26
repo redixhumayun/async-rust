@@ -10,13 +10,11 @@ fn main() {
     env_logger::init();
     let task_queue = Rc::new(RefCell::new(TaskQueue::new()));
     let reactor = Rc::new(RefCell::new(Reactor::new().unwrap()));
-    let runtime = Executor::new(task_queue, Rc::clone(&reactor)).unwrap();
+    let mut runtime = Executor::new(task_queue, Rc::clone(&reactor)).unwrap();
     runtime.block_on(async move {
         let listener = TcpListener::bind("localhost:8000", Rc::clone(&reactor)).unwrap();
-        debug!("Listening on port 8000");
         while let Ok((client, addr)) = listener.accept().unwrap().await {
-            println!("received connection from {:#?}", client);
-            let future_client = TcpClient::new(client, addr, Rc::clone(&reactor)).await;
+            let _future_client = TcpClient::new(client, addr, Rc::clone(&reactor)).await;
             debug!("Finished servicing the client, can now resume the loop");
         }
         println!("Hello World");

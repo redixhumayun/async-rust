@@ -2,14 +2,14 @@
 use std::{
     cell::RefCell,
     future::Future,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
     os::fd::AsRawFd,
+    path::Path,
     rc::Rc,
 };
 
 use log::debug;
-use log::error;
 
 use crate::async_runtime::reactor::InterestType;
 
@@ -56,12 +56,12 @@ impl Future for TcpClient {
                     cx,
                 );
                 self.state = ClientState::Reading;
-                cx.waker().wake_by_ref();
                 return std::task::Poll::Pending;
             }
             ClientState::Reading => {
-                self.state = ClientState::Writing;
                 debug!("Reading data from the socket");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                self.state = ClientState::Writing;
                 let reader = BufReader::new(&self.client);
                 let http_request: Vec<_> = reader
                     .lines()
@@ -72,33 +72,39 @@ impl Future for TcpClient {
                     .iter()
                     .next()
                     .unwrap()
-                    .contains("GET / HTTP 1.1")
+                    .contains("GET / HTTP/1.1")
                 {
                     self.state = ClientState::Writing;
                 } else {
                     self.state = ClientState::Close;
                 }
                 cx.waker().wake_by_ref();
+                self.reactor.borrow_mut().notify().unwrap();
                 return std::task::Poll::Pending;
             }
             ClientState::Writing => {
+                debug!("Writing from the client");
+                let path = Path::new("hello.html");
+                let file = std::fs::File::open(path).unwrap();
+                let mut reader = BufReader::new(file);
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    buf.len(),
+                    String::from_utf8_lossy(&buf),
+                );
+                self.client.write_all(response.as_bytes()).unwrap();
                 self.state = ClientState::Close;
-                debug!("Writing data back to the socket");
-                self.client.write_all(b"Hello from the client").unwrap();
                 cx.waker().wake_by_ref();
+                self.reactor.borrow_mut().notify().unwrap();
                 return std::task::Poll::Pending;
             }
             ClientState::Close => {
-                self.state = ClientState::Closed;
                 debug!("Client is now closing, must de-register from reactor etc.");
-                // self.reactor
-                //     .borrow_mut()
-                //     .remove(
-                //         self.client.as_raw_fd(),
-                //         Event::all(self.client.as_raw_fd().try_into().unwrap()),
-                //     )
-                //     .expect("Something went wrong while attempting to de-register the client from the reactor");
+                self.state = ClientState::Closed;
                 cx.waker().wake_by_ref();
+                self.reactor.borrow_mut().notify().unwrap();
                 return std::task::Poll::Pending;
             }
             ClientState::Closed => {

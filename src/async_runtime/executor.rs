@@ -13,6 +13,7 @@ use super::{
 pub struct Executor {
     task_queue: Rc<RefCell<TaskQueue>>,
     reactor: Rc<RefCell<Reactor>>,
+    monotonic_clock: usize,
 }
 
 impl Executor {
@@ -23,15 +24,16 @@ impl Executor {
         Ok(Self {
             task_queue,
             reactor,
+            monotonic_clock: 0,
         })
     }
 
-    pub fn block_on<F>(&self, future: F) -> F::Output
+    pub fn block_on<F>(&mut self, future: F) -> F::Output
     where
         F: Future<Output = ()> + 'static,
     {
-        debug!("Received a future to block_on in the executor");
         let task = Task {
+            id: self.monotonic_clock,
             future: RefCell::new(Box::pin(future)),
         };
         self.task_queue
@@ -39,12 +41,11 @@ impl Executor {
             .sender()
             .send(Rc::new(task))
             .unwrap();
-        debug!("Pushed the future on the task queue");
+        self.monotonic_clock += 1;
         self.run();
     }
 
     fn run(&self) {
-        debug!("Running the executor's event loop");
         self.task_queue.borrow_mut().receive(); //  prime the event loop with the first set of tasks
         loop {
             loop {
@@ -55,21 +56,21 @@ impl Executor {
                         break;
                     }
                 };
-                debug!("Received a task in the event loop");
 
                 let waker = MyWaker::new(Rc::clone(&task), self.task_queue.borrow().sender());
                 let mut context = Context::from_waker(&waker);
-                debug!("Calling poll on the future in the task");
                 match task.future.borrow_mut().as_mut().poll(&mut context) {
                     std::task::Poll::Ready(_output) => {
                         debug!(
-                            "The future has completed and returned on thread {:?}",
+                            "The future for task {} has completed and returned on thread {:?}",
+                            task.id,
                             std::thread::current().id()
                         );
                     }
                     std::task::Poll::Pending => {
                         debug!(
-                            "The future is pending on thread {:?}",
+                            "The future for task {} is pending on thread {:?}",
+                            task.id,
                             std::thread::current().id()
                         );
                     }
@@ -83,6 +84,7 @@ impl Executor {
             }
 
             if self.reactor.borrow().waiting_on_events() {
+                debug!("waiting on events from the reactor");
                 self.wait_for_io()
                     .map(|events| self.wake_futures_on_io(events))
                     .expect("Error while waiting for io");

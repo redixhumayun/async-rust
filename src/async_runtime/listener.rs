@@ -17,7 +17,6 @@ impl TcpListener {
     }
 
     pub fn accept(&self) -> std::io::Result<ListenerFuture> {
-        self.reactor.borrow_mut().add(self.listener.as_raw_fd())?;
         Ok(ListenerFuture {
             listener: &self.listener,
             reactor: Rc::clone(&self.reactor),

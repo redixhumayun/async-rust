@@ -11,7 +11,7 @@ use std::{
 };
 
 use libc::{kevent, EVFILT_READ, EVFILT_WRITE, EV_ADD, EV_DELETE, EV_ONESHOT};
-use log::debug;
+use log::{debug, error, info};
 
 #[derive(Debug)]
 pub struct Event {
@@ -111,10 +111,6 @@ impl Reactor {
         interest: InterestType,
         context: &mut Context,
     ) {
-        debug!(
-            "Registering interest for source: {} with interest {:?}",
-            source, interest
-        );
         match interest {
             InterestType::Read => {
                 self.readable
@@ -164,7 +160,7 @@ impl Reactor {
     }
 
     /// A helper notify method to unblock the scheduler
-    fn notify(&mut self) -> std::io::Result<usize> {
+    pub fn notify(&mut self) -> std::io::Result<usize> {
         self.notifier.1.write(&[1])
     }
 
@@ -184,7 +180,7 @@ impl Reactor {
         if ev.writable {
             changelist.push(kevent {
                 ident: fd as _,
-                filter: EVFILT_READ,
+                filter: EVFILT_WRITE,
                 flags: EV_DELETE,
                 fflags: 0,
                 data: 0,
@@ -207,6 +203,10 @@ impl Reactor {
             )
         };
         if result < 0 {
+            error!(
+              "There was an error while attempting to modify the kqueue list for {} for event {:?}",
+              fd, ev
+            );
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -214,6 +214,7 @@ impl Reactor {
 
     /// The function that registers interest with the actual underlying syscall
     fn modify(&self, fd: RawFd, ev: Event) -> std::io::Result<()> {
+        debug!("Adding file {} for event {:?} to reactor", fd, ev);
         let mut changelist = Vec::new();
         if ev.readable {
             changelist.push(kevent {
@@ -300,6 +301,8 @@ impl Reactor {
                 Ok(event)
             })
             .collect();
+        info!("Received events {:?}", mapped_events);
+
         mapped_events
     }
 }
