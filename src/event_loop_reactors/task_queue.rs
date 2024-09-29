@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::EventHandler;
+use super::EventHandler;
 
 pub struct RegistrationTask {
     pub fd: usize,
