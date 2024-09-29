@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use core::future::Future;
-use std::{cell::RefCell, rc::Rc, task::Context};
+use std::{cell::RefCell, rc::Rc, sync::Mutex, task::Context};
 
 use log::debug;
 
@@ -13,7 +13,7 @@ use super::{
 pub struct Executor {
     task_queue: Rc<RefCell<TaskQueue>>,
     reactor: Rc<RefCell<Reactor>>,
-    monotonic_clock: usize,
+    monotonic_clock: Mutex<usize>,
 }
 
 impl Executor {
@@ -24,30 +24,47 @@ impl Executor {
         Ok(Self {
             task_queue,
             reactor,
-            monotonic_clock: 0,
+            monotonic_clock: Mutex::new(0),
         })
     }
 
-    pub fn block_on<F>(&mut self, future: F) -> F::Output
+    pub fn block_on<F>(&self, future: F) -> F::Output
     where
         F: Future<Output = ()> + 'static,
     {
         let task = Task {
-            id: self.monotonic_clock,
+            id: *self.monotonic_clock.lock().unwrap(),
             future: RefCell::new(Box::pin(future)),
         };
+        *self.monotonic_clock.lock().unwrap() += 1;
         self.task_queue
             .borrow()
             .sender()
             .send(Rc::new(task))
             .unwrap();
-        self.monotonic_clock += 1;
         self.run();
     }
 
+    pub fn spawn<F>(&self, future: F) -> F::Output
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        let task = Task {
+            id: *self.monotonic_clock.lock().unwrap(),
+            future: RefCell::new(Box::pin(future)),
+        };
+        *self.monotonic_clock.lock().unwrap() += 1;
+        self.task_queue
+            .borrow()
+            .sender()
+            .send(Rc::new(task))
+            .unwrap();
+        self.reactor.borrow_mut().notify().unwrap();
+    }
+
     fn run(&self) {
-        self.task_queue.borrow_mut().receive(); //  prime the event loop with the first set of tasks
         loop {
+            self.task_queue.borrow_mut().receive();
             loop {
                 let task = {
                     if let Some(task) = self.task_queue.borrow_mut().pop() {
@@ -85,9 +102,15 @@ impl Executor {
 
             if self.reactor.borrow().waiting_on_events() {
                 debug!("waiting on events from the reactor");
-                self.wait_for_io()
-                    .map(|events| self.wake_futures_on_io(events))
-                    .expect("Error while waiting for io");
+                match self.wait_for_io() {
+                    Ok(events) => self.wake_futures_on_io(events),
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            break;
+                        }
+                        eprintln!("Error while waiting for IO events :{}", e);
+                    }
+                }
             }
         }
     }

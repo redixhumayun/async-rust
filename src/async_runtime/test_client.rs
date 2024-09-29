@@ -13,9 +13,13 @@ fn send_request(id: usize) {
             stream.write_all(msg).unwrap();
 
             let mut buffer = [0; 1024];
-            stream.read(&mut buffer).unwrap();
+            let bytes_read = stream.read(&mut buffer).unwrap();
 
             let duration = start.elapsed();
+            println!(
+                "The response received {:?}",
+                String::from_utf8_lossy(&buffer[..bytes_read])
+            );
             println!("Thread {} received response in {:?}", id, duration);
         }
         Err(e) => {
@@ -25,7 +29,7 @@ fn send_request(id: usize) {
 }
 
 fn main() {
-    let num_threads = 5;
+    let num_threads = 1000;
     let mut handles = vec![];
 
     let start = Instant::now();

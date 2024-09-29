@@ -2,7 +2,7 @@ use std::{cell::RefCell, future::Future, os::fd::AsRawFd, rc::Rc};
 
 use log::debug;
 
-use super::reactor::Reactor;
+use super::reactor::{Event, Reactor};
 
 pub struct TcpListener {
     listener: std::net::TcpListener,
@@ -21,6 +21,18 @@ impl TcpListener {
             listener: &self.listener,
             reactor: Rc::clone(&self.reactor),
         })
+    }
+}
+
+impl Drop for TcpListener {
+    fn drop(&mut self) {
+        self.reactor
+            .borrow_mut()
+            .remove(
+                self.listener.as_raw_fd(),
+                Event::all(self.listener.as_raw_fd() as _),
+            )
+            .unwrap();
     }
 }
 

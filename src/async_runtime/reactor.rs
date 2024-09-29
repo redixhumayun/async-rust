@@ -165,9 +165,12 @@ impl Reactor {
     }
 
     /// The function that removes interest for a file descriptor with the actual underlying syscall
-    pub fn remove(&self, fd: RawFd, ev: Event) -> std::io::Result<()> {
+    pub fn remove(&mut self, fd: RawFd, ev: Event) -> std::io::Result<()> {
+        self.readable.remove(&(fd as usize));
+        self.writable.remove(&(fd as usize));
+        let registered_interest = self.get_interest(fd as _);
         let mut changelist = Vec::new();
-        if ev.readable {
+        if ev.readable && registered_interest.readable {
             changelist.push(kevent {
                 ident: fd as _,
                 filter: EVFILT_READ,
@@ -177,7 +180,7 @@ impl Reactor {
                 udata: ev.fd as *mut c_void,
             });
         }
-        if ev.writable {
+        if ev.writable && registered_interest.writable {
             changelist.push(kevent {
                 ident: fd as _,
                 filter: EVFILT_WRITE,
