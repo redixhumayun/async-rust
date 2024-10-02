@@ -63,8 +63,8 @@ pub enum InterestType {
 pub struct Reactor {
     kqueue_fd: RawFd,
     notifier: (UnixStream, UnixStream),
-    readable: HashMap<usize, Vec<Waker>>, //  change String to Vec<Waker>
-    writable: HashMap<usize, Vec<Waker>>, //  change String to Vec<Waker>
+    readable: HashMap<usize, Vec<Waker>>,
+    writable: HashMap<usize, Vec<Waker>>,
 }
 
 impl Reactor {
