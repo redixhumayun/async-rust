@@ -29,7 +29,7 @@ fn send_request(id: usize) {
 }
 
 fn main() {
-    let num_threads = 1000;
+    let num_threads = 100;
     let mut handles = vec![];
 
     let start = Instant::now();
