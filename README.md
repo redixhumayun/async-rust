@@ -13,7 +13,7 @@ There is a test client application located in the folders for 2 & 3 used to simu
 There are 3 accompanying blog posts - one for each section
 1. https://redixhumayun.github.io/async/2024/08/05/async-runtimes.html
 2. https://redixhumayun.github.io/async/2024/09/18/async-runtimes-part-ii.html
-3. [insert link here once part 3 is published]
+3. https://redixhumayun.github.io/async/2024/10/10/async-runtimes-part-iii.html
 
 Have fun :)
 
